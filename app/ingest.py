@@ -165,13 +165,20 @@ def ingest_from_local(library_dir: str = SONG_LIBRARY_DIR) -> None:
     print("[ingest] Done.")
 
 
+def _parse_limit(val):
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return 0
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Song ID — ingest audio library")
     parser.add_argument("--local", action="store_true",
                         help="Process local song_library/ instead of R2 bucket")
     parser.add_argument("--prefix", default="",
                         help="R2 key prefix/folder to filter (e.g. 'zones/zone-001/')")
-    parser.add_argument("--limit", type=int, default=0,
+    parser.add_argument("--limit", type=_parse_limit, default=0,
                         help="Stop after N new songs are ingested (0 = no limit)")
     args = parser.parse_args()
 
