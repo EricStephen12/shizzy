@@ -95,7 +95,7 @@ def ingest_from_r2(prefix: str = "", limit: int = 0) -> None:
 
             # Register song
             title = _title_from_key(key)
-            song  = Song(title=title, r2_key=key, r2_url=r2_url)
+            song  = Song(title=title, file_path=key, r2_key=key, r2_url=r2_url)
             db.add(song)
             db.commit()
             db.refresh(song)

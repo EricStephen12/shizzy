@@ -92,6 +92,7 @@ def init_db() -> None:
     with engine.connect() as conn:
         conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_key VARCHAR;"))
         conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_url VARCHAR;"))
+        conn.execute(text("ALTER TABLE songs ALTER COLUMN file_path DROP NOT NULL;"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_songs_r2_key ON songs (r2_key);"))
         conn.commit()
 
