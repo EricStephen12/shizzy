@@ -124,16 +124,34 @@ def store_fingerprints(song_id: int, audio_path: str, db: Session) -> int:
     Returns the number of hashes stored.
     Idempotent — existing hashes for the same song_id are skipped via UNIQUE constraint.
     """
-    hashes = _extract_hashes(audio_path)
-    rows = []
-    for h, offset in hashes:
-        rows.append(SongFingerprint(song_id=song_id, hash_val=h, offset=offset))
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    # Bulk insert, ignore conflicts
-    for row in rows:
-        db.merge(row)   # merge won't crash on duplicate unique keys
-    db.commit()
-    return len(hashes)
+    hashes = _extract_hashes(audio_path)
+    if not hashes:
+        return 0
+
+    # Deduplicate in-memory to prevent duplicate keys in same batch
+    seen = set()
+    unique_rows = []
+    for h, offset in hashes:
+        key = (song_id, h, offset)
+        if key not in seen:
+            seen.add(key)
+            unique_rows.append({"song_id": song_id, "hash_val": h, "offset": offset})
+
+    # Chunk into safe batches of 250 rows to keep queries lightweight
+    chunk_size = 250
+    for i in range(0, len(unique_rows), chunk_size):
+        chunk = unique_rows[i:i + chunk_size]
+        stmt = (
+            pg_insert(SongFingerprint)
+            .values(chunk)
+            .on_conflict_do_nothing(constraint="uq_fp_entry")
+        )
+        db.execute(stmt)
+        db.commit()
+
+    return len(unique_rows)
 
 
 def match_fingerprints(audio_path: str, db: Session) -> Optional[dict]:

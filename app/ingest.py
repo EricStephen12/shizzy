@@ -41,6 +41,7 @@ def _ingest_one(song_id: int, audio_path: str, db) -> None:
         n = fingerprint_engine.store_fingerprints(song_id, audio_path, db)
         print(f"     [fingerprint]  {n} hashes stored")
     except Exception as exc:
+        db.rollback()
         print(f"     [fingerprint]  ERROR: {exc}")
 
     # Melody contour
@@ -49,6 +50,7 @@ def _ingest_one(song_id: int, audio_path: str, db) -> None:
         print("     [melody]       contour stored" if ok
               else "     [melody]       contour too short — skipped")
     except Exception as exc:
+        db.rollback()
         print(f"     [melody]       ERROR: {exc}")
 
 
