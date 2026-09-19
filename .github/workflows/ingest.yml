@@ -1,0 +1,59 @@
+﻿name: Ingest Audio Library from R2
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: 'R2 key prefix to filter (blank = all, e.g. zones/zone-001/)'
+        required: false
+        default: ''
+      limit:
+        description: 'Max songs to ingest (0 = unlimited)'
+        required: false
+        default: '0'
+
+jobs:
+  ingest:
+    name: Fingerprint & Index Audio Library
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      DB_HOST:          ${{ secrets.DB_HOST }}
+      DB_PORT:          ${{ secrets.DB_PORT }}
+      DB_NAME:          ${{ secrets.DB_NAME }}
+      DB_USER:          ${{ secrets.DB_USER }}
+      DB_PASSWORD:      ${{ secrets.DB_PASSWORD }}
+      R2_ACCOUNT_ID:    ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_KEY:    ${{ secrets.R2_SECRET_KEY }}
+      R2_BUCKET_NAME:   ${{ secrets.R2_BUCKET_NAME }}
+      R2_PUBLIC_URL:    ${{ secrets.R2_PUBLIC_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install system audio libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg libsndfile1
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingest (R2 -> PostgreSQL)
+        working-directory: song-id-app
+        run: |
+          python -m app.ingest \
+            --prefix "${{ github.event.inputs.prefix }}" \
+            --limit  "${{ github.event.inputs.limit }}"
+
+      - name: Done
+        run: echo "Ingest complete!"

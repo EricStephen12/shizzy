@@ -1,0 +1,28 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Local audio library (songs are in R2, not git)
+song_library/
+
+# Temp / debug images
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Environment files (never commit secrets)
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db

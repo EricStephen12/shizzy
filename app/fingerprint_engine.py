@@ -1,0 +1,195 @@
+"""
+fingerprint_engine.py — Custom spectrogram peak-hashing fingerprinter.
+
+No external fingerprinting library required — built entirely on scipy/numpy
+which are already in the stack.
+
+Algorithm (classic "Shazam-style"):
+  1. Load audio → mono, 22 kHz
+  2. STFT → magnitude spectrogram
+  3. Find local peaks in time-frequency space (constellation map)
+  4. Pair each peak with its nearest neighbours in a fan-out window
+  5. Hash each pair: sha1(freq1, freq2, Δtime) → hex
+  6. Store (hash, offset) per song in Postgres
+
+Matching:
+  1. Extract hashes from the clip
+  2. Look up each hash in the DB
+  3. For each candidate song, build a histogram of (clip_offset − db_offset) deltas
+  4. The largest coherent cluster → confidence score
+"""
+
+import hashlib
+from collections import defaultdict
+from typing import Optional
+
+import numpy as np
+from scipy.ndimage import maximum_filter
+import librosa
+from sqlalchemy.orm import Session
+
+from app.config import (
+    FP_PEAKS_PER_SEC,
+    FP_FREQ_MIN,
+    FP_FREQ_MAX,
+    FP_CONFIDENCE_THRESHOLD,
+)
+from app.db import Song, SongFingerprint
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+SR          = 22_050       # sample rate for loading
+HOP_LENGTH  = 512          # STFT hop
+N_FFT       = 4096         # STFT window — bigger window → finer frequency resolution
+PEAK_NEIGHBOURHOOD = 10    # pixels in each axis for local-max filter
+FAN_VALUE   = 15           # how many neighbour peaks to pair with each anchor
+MIN_HASH_DT = 0            # min Δtime (frames) between paired peaks
+MAX_HASH_DT = 200          # max Δtime (frames) between paired peaks
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _load_audio(audio_path: str) -> tuple[np.ndarray, int]:
+    """Load to mono float32 at fixed sample rate."""
+    y, sr = librosa.load(audio_path, sr=SR, mono=True)
+    return y, sr
+
+
+def _spectrogram(y: np.ndarray) -> np.ndarray:
+    """Return magnitude spectrogram clipped to our frequency band."""
+    S = np.abs(librosa.stft(y, n_fft=N_FFT, hop_length=HOP_LENGTH))
+    # Convert frequency axis limits to bin indices
+    freqs = librosa.fft_frequencies(sr=SR, n_fft=N_FFT)
+    lo = int(np.searchsorted(freqs, FP_FREQ_MIN))
+    hi = int(np.searchsorted(freqs, FP_FREQ_MAX)) + 1
+    return S[lo:hi, :]
+
+
+def _find_peaks(S: np.ndarray) -> list[tuple[int, int]]:
+    """
+    Return (freq_bin, time_frame) for every local maximum that stands out
+    above its neighbourhood.
+    """
+    struct = np.ones((PEAK_NEIGHBOURHOOD, PEAK_NEIGHBOURHOOD))
+    local_max = maximum_filter(S, footprint=struct) == S
+    # Suppress the very quiet floor (bottom 10 % of amplitude)
+    threshold = np.percentile(S, 10)
+    detected = local_max & (S > threshold)
+    freq_idxs, time_idxs = np.where(detected)
+    return list(zip(freq_idxs.tolist(), time_idxs.tolist()))
+
+
+def _make_hashes(peaks: list[tuple[int, int]]) -> list[tuple[str, float]]:
+    """
+    For every anchor peak, pair it with up to FAN_VALUE later peaks.
+    Return list of (hash_hex, anchor_offset_in_seconds).
+    """
+    # Sort by time so fan-out always goes forward
+    peaks = sorted(peaks, key=lambda p: p[1])
+    hashes = []
+    for i, (f1, t1) in enumerate(peaks):
+        for j in range(1, FAN_VALUE + 1):
+            idx = i + j
+            if idx >= len(peaks):
+                break
+            f2, t2 = peaks[idx]
+            dt = t2 - t1
+            if dt < MIN_HASH_DT or dt > MAX_HASH_DT:
+                continue
+            raw = f"{f1}|{f2}|{dt}"
+            h = hashlib.sha1(raw.encode()).hexdigest()
+            offset_sec = t1 * HOP_LENGTH / SR
+            hashes.append((h, offset_sec))
+    return hashes
+
+
+def _extract_hashes(audio_path: str) -> list[tuple[str, float]]:
+    """Full pipeline: audio → hashes."""
+    y, _ = _load_audio(audio_path)
+    S = _spectrogram(y)
+    peaks = _find_peaks(S)
+    return _make_hashes(peaks)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def store_fingerprints(song_id: int, audio_path: str, db: Session) -> int:
+    """
+    Fingerprint an audio file and persist its hashes to the DB.
+    Returns the number of hashes stored.
+    Idempotent — existing hashes for the same song_id are skipped via UNIQUE constraint.
+    """
+    hashes = _extract_hashes(audio_path)
+    rows = []
+    for h, offset in hashes:
+        rows.append(SongFingerprint(song_id=song_id, hash_val=h, offset=offset))
+
+    # Bulk insert, ignore conflicts
+    for row in rows:
+        db.merge(row)   # merge won't crash on duplicate unique keys
+    db.commit()
+    return len(hashes)
+
+
+def match_fingerprints(audio_path: str, db: Session) -> Optional[dict]:
+    """
+    Match a clip against the stored fingerprint library.
+
+    Returns:
+        { "song_id": int, "title": str, "artist": str, "confidence": float }
+        or None if no match exceeds FP_CONFIDENCE_THRESHOLD.
+    """
+    hashes = _extract_hashes(audio_path)
+    if not hashes:
+        return None
+
+    hash_set = {h for h, _ in hashes}
+    clip_offsets = {h: off for h, off in hashes}
+
+    # Fetch all DB rows whose hash appears in the clip
+    db_rows = (
+        db.query(SongFingerprint)
+          .filter(SongFingerprint.hash_val.in_(hash_set))
+          .all()
+    )
+
+    if not db_rows:
+        return None
+
+    # Build delta histograms: for each song, count how many hashes align
+    # at the same (db_offset − clip_offset) = consistent time alignment
+    deltas: dict[int, defaultdict] = defaultdict(lambda: defaultdict(int))
+    for row in db_rows:
+        clip_off = clip_offsets.get(row.hash_val, 0.0)
+        delta = round(row.offset - clip_off, 2)   # rounded to 10 ms bins
+        deltas[row.song_id][delta] += 1
+
+    # Best song = highest peak count in its delta histogram
+    best_song_id = None
+    best_count   = 0
+    for song_id, delta_hist in deltas.items():
+        peak = max(delta_hist.values())
+        if peak > best_count:
+            best_count   = peak
+            best_song_id = song_id
+
+    if best_song_id is None:
+        return None
+
+    # Normalise against how many query hashes we had
+    confidence = min(best_count / len(hashes), 1.0)
+    if confidence < FP_CONFIDENCE_THRESHOLD:
+        return None
+
+    song = db.query(Song).filter(Song.id == best_song_id).first()
+    return {
+        "song_id":    best_song_id,
+        "title":      song.title if song else "Unknown",
+        "artist":     song.artist if song else None,
+        "confidence": round(confidence, 4),
+    }
