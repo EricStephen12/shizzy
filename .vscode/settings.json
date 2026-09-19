@@ -1,6 +1,10 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/../venv/Scripts/python.exe",
+  "python.defaultInterpreterPath": "C:\\Users\\Eric\\Documents\\work\\shizzy\\venv\\Scripts\\python.exe",
+  "python.interpreterPath": "C:\\Users\\Eric\\Documents\\work\\shizzy\\venv\\Scripts\\python.exe",
   "python.analysis.extraPaths": [
-    "${workspaceFolder}"
+    "C:\\Users\\Eric\\Documents\\work\\shizzy\\song-id-app"
+  ],
+  "python.autoComplete.extraPaths": [
+    "C:\\Users\\Eric\\Documents\\work\\shizzy\\song-id-app"
   ]
 }
