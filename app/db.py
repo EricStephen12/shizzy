@@ -86,8 +86,14 @@ class MelodyContour(Base):
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """Create all tables if they do not already exist."""
+    """Create all tables if they do not already exist, and ensure all columns exist."""
+    from sqlalchemy import text
     Base.metadata.create_all(bind=engine)
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_key VARCHAR;"))
+        conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_url VARCHAR;"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_songs_r2_key ON songs (r2_key);"))
+        conn.commit()
 
 
 def get_db():
