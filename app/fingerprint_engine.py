@@ -43,7 +43,7 @@ SR          = 22_050       # sample rate for loading
 HOP_LENGTH  = 512          # STFT hop
 N_FFT       = 4096         # STFT window — bigger window → finer frequency resolution
 PEAK_NEIGHBOURHOOD = 10    # pixels in each axis for local-max filter
-FAN_VALUE   = 15           # how many neighbour peaks to pair with each anchor
+FAN_VALUE   = 5            # how many neighbour peaks to pair with each anchor
 MIN_HASH_DT = 0            # min Δtime (frames) between paired peaks
 MAX_HASH_DT = 200          # max Δtime (frames) between paired peaks
 
@@ -55,7 +55,7 @@ MAX_HASH_DT = 200          # max Δtime (frames) between paired peaks
 def _load_audio(audio_path: str) -> tuple[np.ndarray, int]:
     """Load to mono float32 at fixed sample rate."""
     y, sr = librosa.load(audio_path, sr=SR, mono=True)
-    return y, sr
+    return y, int(sr)
 
 
 def _spectrogram(y: np.ndarray) -> np.ndarray:
@@ -70,16 +70,35 @@ def _spectrogram(y: np.ndarray) -> np.ndarray:
 
 def _find_peaks(S: np.ndarray) -> list[tuple[int, int]]:
     """
-    Return (freq_bin, time_frame) for every local maximum that stands out
-    above its neighbourhood.
+    Return (freq_bin, time_frame) for prominent local peaks.
+    Enforces FP_PEAKS_PER_SEC so we keep only the strongest peaks per second,
+    preventing explosive database growth and out-of-memory crashes.
     """
     struct = np.ones((PEAK_NEIGHBOURHOOD, PEAK_NEIGHBOURHOOD))
-    local_max = maximum_filter(S, footprint=struct) == S
-    # Suppress the very quiet floor (bottom 10 % of amplitude)
-    threshold = np.percentile(S, 10)
+    local_max = (maximum_filter(S, footprint=struct) == S)
+    # Suppress lower 50% noise floor
+    threshold = np.percentile(S, 50)
     detected = local_max & (S > threshold)
     freq_idxs, time_idxs = np.where(detected)
-    return list(zip(freq_idxs.tolist(), time_idxs.tolist()))
+    if len(freq_idxs) == 0:
+        return []
+
+    # Select top FP_PEAKS_PER_SEC loudest peaks per second
+    amps = S[freq_idxs, time_idxs]
+    frames_per_sec = max(int(SR / HOP_LENGTH), 1)
+    peaks_by_sec = defaultdict(list)
+    for f, t, amp in zip(freq_idxs, time_idxs, amps):
+        sec = int(t // frames_per_sec)
+        peaks_by_sec[sec].append((amp, f, t))
+
+    selected_peaks = []
+    for sec in sorted(peaks_by_sec.keys()):
+        sec_peaks = peaks_by_sec[sec]
+        sec_peaks.sort(key=lambda x: x[0], reverse=True)
+        for amp, f, t in sec_peaks[:FP_PEAKS_PER_SEC]:
+            selected_peaks.append((int(f), int(t)))
+
+    return selected_peaks
 
 
 def _make_hashes(peaks: list[tuple[int, int]]) -> list[tuple[str, float]]:
@@ -169,9 +188,9 @@ def match_fingerprints(audio_path: str, db: Session) -> Optional[dict]:
     hash_set = {h for h, _ in hashes}
     clip_offsets = {h: off for h, off in hashes}
 
-    # Fetch all DB rows whose hash appears in the clip
+    # Fetch specific columns instead of heavy ORM objects
     db_rows = (
-        db.query(SongFingerprint)
+        db.query(SongFingerprint.song_id, SongFingerprint.hash_val, SongFingerprint.offset)
           .filter(SongFingerprint.hash_val.in_(hash_set))
           .all()
     )
@@ -181,17 +200,17 @@ def match_fingerprints(audio_path: str, db: Session) -> Optional[dict]:
 
     # Build delta histograms: for each song, count how many hashes align
     # at the same (db_offset − clip_offset) = consistent time alignment
-    deltas: dict[int, defaultdict] = defaultdict(lambda: defaultdict(int))
-    for row in db_rows:
-        clip_off = clip_offsets.get(row.hash_val, 0.0)
-        delta = round(row.offset - clip_off, 2)   # rounded to 10 ms bins
-        deltas[row.song_id][delta] += 1
+    deltas = defaultdict(lambda: defaultdict(int))
+    for s_id, h_val, s_offset in db_rows:
+        clip_off = clip_offsets.get(str(h_val), 0.0)
+        delta = round(float(s_offset) - clip_off, 2)   # rounded to 10 ms bins
+        deltas[int(s_id)][delta] += 1
 
     # Best song = highest peak count in its delta histogram
     best_song_id = None
     best_count   = 0
     for song_id, delta_hist in deltas.items():
-        peak = max(delta_hist.values())
+        peak = max(delta_hist.values(), default=0)
         if peak > best_count:
             best_count   = peak
             best_song_id = song_id
