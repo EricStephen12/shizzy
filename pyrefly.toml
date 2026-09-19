@@ -1,0 +1,4 @@
+search_path = ["."]
+
+[errors]
+missing-import = false

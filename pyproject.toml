@@ -1,3 +1,6 @@
 [tool.pyrefly]
 python-interpreter-path = "../venv/Scripts/python.exe"
 search-path = ["."]
+
+[tool.pyrefly.errors]
+missing-import = false
