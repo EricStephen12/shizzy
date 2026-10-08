@@ -18,6 +18,11 @@ import os
 import sys
 import argparse
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import SONG_LIBRARY_DIR
@@ -63,13 +68,13 @@ def ingest_from_r2(prefix: str = "", limit: int = 0) -> None:
         prefix: Only process keys that start with this string (e.g. 'zones/zone-001/').
         limit:  Stop after this many NEW songs are ingested (0 = no limit).
     """
-    print(f"[ingest] Mode: R2 bucket → '{r2_storage.R2_BUCKET_NAME}'")
+    print(f"[ingest] Mode: R2 bucket -> '{r2_storage.R2_BUCKET_NAME}'")
     if limit:
         print(f"[ingest] Limit: {limit} new songs")
-    print("[ingest] Initialising database tables …")
+    print("[ingest] Initialising database tables ...")
     init_db()
 
-    print("[ingest] Listing audio files in R2 …")
+    print("[ingest] Listing audio files in R2 ...")
     keys = r2_storage.list_audio_keys(prefix=prefix)
 
     if not keys:
@@ -85,7 +90,7 @@ def ingest_from_r2(prefix: str = "", limit: int = 0) -> None:
                 print(f"[ingest] Reached limit of {limit} songs — stopping.")
                 break
 
-            print(f"  → {key}")
+            print(f"  -> {key}")
             r2_url = r2_storage.get_public_url(key)
 
             # Skip if already ingested (idempotent via r2_key)
@@ -106,7 +111,7 @@ def ingest_from_r2(prefix: str = "", limit: int = 0) -> None:
             # Download temp copy → process → delete
             tmp_path = None
             try:
-                print("     [r2]          downloading temp copy …")
+                print("     [r2]          downloading temp copy ...")
                 tmp_path = r2_storage.download_temp(key)
                 _ingest_one(song.id, tmp_path, db)
                 ingested += 1
@@ -128,8 +133,8 @@ def ingest_from_local(library_dir: str = SONG_LIBRARY_DIR) -> None:
     Process audio files from the local song_library/ folder.
     Stores the local file path in the DB (r2_key/r2_url will be None).
     """
-    print(f"[ingest] Mode: local → '{os.path.abspath(library_dir)}'")
-    print("[ingest] Initialising database tables …")
+    print(f"[ingest] Mode: local -> '{os.path.abspath(library_dir)}'")
+    print("[ingest] Initialising database tables ...")
     init_db()
 
     audio_files = []
@@ -146,7 +151,7 @@ def ingest_from_local(library_dir: str = SONG_LIBRARY_DIR) -> None:
     db = SessionLocal()
     try:
         for audio_path in sorted(audio_files):
-            print(f"  → {os.path.basename(audio_path)}")
+            print(f"  -> {os.path.basename(audio_path)}")
             existing = db.query(Song).filter(Song.file_path == audio_path).first()
             if existing:
                 print("     [songs]       already registered — skipping")

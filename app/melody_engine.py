@@ -117,16 +117,46 @@ def _normalise_confidence(distance: float, contour_len: int) -> float:
     return round(score, 4)
 
 
+def _best_window_distance(hum: list[int], lib: list[int]) -> float:
+    """
+    Find the best matching window in the library contour for the hum.
+    Slides a window of hum_len across the library contour and returns
+    the minimum DTW distance found. This handles the case where the user
+    hums a short section of a long song.
+    """
+    hum_len = len(hum)
+    lib_len = len(lib)
+
+    # If library is shorter than hum, just compare directly
+    if lib_len <= hum_len:
+        return _dtw_distance(hum, lib)
+
+    # Slide window across library contour with 50% step for speed
+    step = max(1, hum_len // 2)
+    best_dist = float('inf')
+
+    for start in range(0, lib_len - hum_len + 1, step):
+        window = lib[start:start + hum_len]
+        dist = _dtw_distance(hum, window)
+        if dist < best_dist:
+            best_dist = dist
+
+    return best_dist
+
+
 def match_melody(audio_path: str, db: Session, top_n: int = 3) -> list[dict]:
     """
     Match a hum/melody clip against all stored contours.
+    Uses sliding window DTW so a short hum can match against a full song.
 
     Returns a list (up to top_n) of:
         { "song_id": int, "title": str, "artist": str, "confidence": float }
     sorted best-first.  Returns [] if the hum is too short or no matches exist.
     """
     hum_contour = extract_contour(audio_path)
+    print(f"[melody] hum contour length: {len(hum_contour)}")
     if len(hum_contour) < 5:
+        print("[melody] hum too short, skipping")
         return []
 
     all_contours = (
@@ -142,14 +172,14 @@ def match_melody(audio_path: str, db: Session, top_n: int = 3) -> list[dict]:
         lib_contour = row.contour
         if not lib_contour:
             continue
-        dist = _dtw_distance(hum_contour, lib_contour)
+        dist = _best_window_distance(hum_contour, lib_contour)
         confidence = _normalise_confidence(dist, len(hum_contour))
         scores.append({
             "song_id":    row.song_id,
             "title":      row.song.title if row.song else "Unknown",
             "artist":     row.song.artist if row.song else None,
             "confidence": confidence,
-            "_distance":  dist,          # internal, stripped before response
+            "_distance":  dist,
         })
 
     scores.sort(key=lambda x: x["_distance"])

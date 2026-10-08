@@ -13,6 +13,10 @@ env/
 # Local audio library (songs are in R2, not git)
 song_library/
 
+# Local SQLite DB (Railway uses Postgres)
+*.db
+*.sqlite
+
 # Temp / debug images
 *.png
 *.jpg

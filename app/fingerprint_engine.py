@@ -139,74 +139,102 @@ def _extract_hashes(audio_path: str) -> list[tuple[str, float]]:
 
 def store_fingerprints(song_id: int, audio_path: str, db: Session) -> int:
     """
-    Fingerprint an audio file and persist its hashes to the DB.
+    Fingerprint an audio file and persist its hashes to Postgres + Redis index.
     Returns the number of hashes stored.
-    Idempotent — existing hashes for the same song_id are skipped via UNIQUE constraint.
+    Idempotent — existing hashes are skipped.
     """
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from app.db import _is_sqlite
+    from app import hash_index
+    from app.redis_client import ping_redis
 
     hashes = _extract_hashes(audio_path)
     if not hashes:
         return 0
 
-    # Deduplicate in-memory to prevent duplicate keys in same batch
+    # Deduplicate in-memory
     seen = set()
+    unique_hashes = []
     unique_rows = []
     for h, offset in hashes:
         key = (song_id, h, offset)
         if key not in seen:
             seen.add(key)
+            unique_hashes.append((h, offset))
             unique_rows.append({"song_id": song_id, "hash_val": h, "offset": offset})
 
-    # Chunk into safe batches of 250 rows to keep queries lightweight
+    # --- Store in Postgres (source of truth) ---
     chunk_size = 250
     for i in range(0, len(unique_rows), chunk_size):
         chunk = unique_rows[i:i + chunk_size]
-        stmt = (
-            pg_insert(SongFingerprint)
-            .values(chunk)
-            .on_conflict_do_nothing(constraint="uq_fp_entry")
-        )
+        if _is_sqlite:
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+            stmt = (
+                sqlite_insert(SongFingerprint)
+                .values(chunk)
+                .on_conflict_do_nothing()
+            )
+        else:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            stmt = (
+                pg_insert(SongFingerprint)
+                .values(chunk)
+                .on_conflict_do_nothing(constraint="uq_fp_entry")
+            )
         db.execute(stmt)
         db.commit()
+
+    # --- Store in Redis index (fast lookup) ---
+    if ping_redis():
+        hash_index.store_hashes(song_id, unique_hashes)
+        hash_index.mark_song_indexed(song_id)
 
     return len(unique_rows)
 
 
 def match_fingerprints(audio_path: str, db: Session) -> Optional[dict]:
     """
-    Match a clip against the stored fingerprint library.
+    Match a clip against the fingerprint library.
+    Uses Redis index if available, falls back to Postgres.
 
     Returns:
         { "song_id": int, "title": str, "artist": str, "confidence": float }
         or None if no match exceeds FP_CONFIDENCE_THRESHOLD.
     """
+    from app import hash_index
+    from app.redis_client import ping_redis
+
     hashes = _extract_hashes(audio_path)
     if not hashes:
         return None
 
-    hash_set = {h for h, _ in hashes}
-    clip_offsets = {h: off for h, off in hashes}
+    hash_list = list({h for h, _ in hashes})
+    clip_offsets = defaultdict(list)
+    for h, off in hashes:
+        clip_offsets[h].append(off)
 
-    # Fetch specific columns instead of heavy ORM objects
-    db_rows = (
-        db.query(SongFingerprint.song_id, SongFingerprint.hash_val, SongFingerprint.offset)
-          .filter(SongFingerprint.hash_val.in_(hash_set))
-          .all()
-    )
+    # --- Try Redis index first (fast path) ---
+    redis_available = ping_redis()
+    if redis_available:
+        db_rows = hash_index.lookup_hashes(hash_list)
+    else:
+        # Fallback to Postgres
+        db_rows = (
+            db.query(SongFingerprint.song_id, SongFingerprint.hash_val, SongFingerprint.offset)
+              .filter(SongFingerprint.hash_val.in_(hash_list))
+              .all()
+        )
 
     if not db_rows:
         return None
 
-    # Build delta histograms: for each song, count how many hashes align
-    # at the same (db_offset − clip_offset) = consistent time alignment
+    # Build delta histograms
     deltas = defaultdict(lambda: defaultdict(int))
     for s_id, h_val, s_offset in db_rows:
-        clip_off = clip_offsets.get(str(h_val), 0.0)
-        delta = round(float(s_offset) - clip_off, 2)   # rounded to 10 ms bins
-        deltas[int(s_id)][delta] += 1
+        for clip_off in clip_offsets.get(str(h_val), []):
+            delta = round(float(s_offset) - clip_off, 2)
+            deltas[int(s_id)][delta] += 1
 
-    # Best song = highest peak count in its delta histogram
+    # Best song = highest peak in delta histogram
     best_song_id = None
     best_count   = 0
     for song_id, delta_hist in deltas.items():
@@ -218,7 +246,6 @@ def match_fingerprints(audio_path: str, db: Session) -> Optional[dict]:
     if best_song_id is None:
         return None
 
-    # Normalise against how many query hashes we had
     confidence = min(best_count / len(hashes), 1.0)
     if confidence < FP_CONFIDENCE_THRESHOLD:
         return None

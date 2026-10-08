@@ -24,16 +24,20 @@ from app.config import DATABASE_URL
 # ---------------------------------------------------------------------------
 # Engine + session factory
 # ---------------------------------------------------------------------------
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300,
-    connect_args={
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5,
-    },
+    # SQLite doesn't support pool_pre_ping or keepalives
+    **({"pool_pre_ping": True, "pool_recycle": 300} if not _is_sqlite else {}),
+    connect_args=(
+        {} if _is_sqlite else {
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        }
+    ),
 )
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
@@ -96,15 +100,17 @@ class MelodyContour(Base):
 # ---------------------------------------------------------------------------
 
 def init_db() -> None:
-    """Create all tables if they do not already exist, and ensure all columns exist."""
+    """Create all tables if they do not already exist."""
     from sqlalchemy import text
     Base.metadata.create_all(bind=engine)
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_key VARCHAR;"))
-        conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_url VARCHAR;"))
-        conn.execute(text("ALTER TABLE songs ALTER COLUMN file_path DROP NOT NULL;"))
-        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_songs_r2_key ON songs (r2_key);"))
-        conn.commit()
+    # PostgreSQL-only schema migrations (add columns added after initial deploy)
+    if not _is_sqlite:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_key VARCHAR;"))
+            conn.execute(text("ALTER TABLE songs ADD COLUMN IF NOT EXISTS r2_url VARCHAR;"))
+            conn.execute(text("ALTER TABLE songs ALTER COLUMN file_path DROP NOT NULL;"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_songs_r2_key ON songs (r2_key);"))
+            conn.commit()
 
 
 def get_db():
