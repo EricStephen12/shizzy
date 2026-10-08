@@ -1,0 +1,73 @@
+version: '3.9'
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Redis — queue + hash index + result cache
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: songid-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes  # persist data across restarts
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # FastAPI — receives requests, queues jobs, returns results
+  # --------------------------------------------------------------------------
+  api:
+    build: .
+    container_name: songid-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL:-}
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
+      - R2_SECRET_KEY=${R2_SECRET_KEY:-}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME:-}
+      - R2_PUBLIC_URL=${R2_PUBLIC_URL:-}
+    volumes:
+      - ./song_library:/app/song_library
+      - ./song_id.db:/app/song_id.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Celery workers — process audio identification jobs
+  # Scale with: docker-compose up --scale worker=4
+  # --------------------------------------------------------------------------
+  worker:
+    build: .
+    container_name: songid-worker
+    command: celery -A app.worker worker --loglevel=info --concurrency=2
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=${DATABASE_URL:-}
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
+      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
+      - R2_SECRET_KEY=${R2_SECRET_KEY:-}
+      - R2_BUCKET_NAME=${R2_BUCKET_NAME:-}
+      - R2_PUBLIC_URL=${R2_PUBLIC_URL:-}
+    volumes:
+      - ./song_library:/app/song_library
+      - ./song_id.db:/app/song_id.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
