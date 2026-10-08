@@ -2,9 +2,9 @@ version: '3.9'
 
 services:
 
-  # --------------------------------------------------------------------------
-  # Redis — queue + hash index + result cache
-  # --------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Redis — queue + fingerprint hash index + result cache
+  # -------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: songid-redis
@@ -12,7 +12,7 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes  # persist data across restarts
+    command: redis-server --appendonly yes  # persist data to disk
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -20,54 +20,78 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # --------------------------------------------------------------------------
-  # FastAPI — receives requests, queues jobs, returns results
-  # --------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # PostgreSQL — song metadata + fingerprint hashes (source of truth)
+  # -------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: songid-postgres
+    environment:
+      POSTGRES_DB:       songid
+      POSTGRES_USER:     songid
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-songid_dev_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U songid"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # API Server — FastAPI (handles HTTP, queues jobs, returns instantly)
+  # -------------------------------------------------------------------------
   api:
     build: .
     container_name: songid-api
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
     ports:
       - "8000:8000"
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=${DATABASE_URL:-}
-      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
-      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
-      - R2_SECRET_KEY=${R2_SECRET_KEY:-}
-      - R2_BUCKET_NAME=${R2_BUCKET_NAME:-}
-      - R2_PUBLIC_URL=${R2_PUBLIC_URL:-}
-    volumes:
-      - ./song_library:/app/song_library
-      - ./song_id.db:/app/song_id.db
+      REDIS_URL:    redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg2://songid:${DB_PASSWORD:-songid_dev_password}@postgres:5432/songid
+      R2_ACCOUNT_ID:    ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_KEY:    ${R2_SECRET_KEY}
+      R2_BUCKET_NAME:   ${R2_BUCKET_NAME}
+      R2_PUBLIC_URL:    ${R2_PUBLIC_URL}
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - /tmp:/tmp   # shared temp folder for audio files
     restart: unless-stopped
 
-  # --------------------------------------------------------------------------
-  # Celery workers — process audio identification jobs
-  # Scale with: docker-compose up --scale worker=4
-  # --------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Celery Worker — processes audio identification jobs
+  # Scale with: docker compose up --scale worker=4
+  # -------------------------------------------------------------------------
   worker:
     build: .
     container_name: songid-worker
     command: celery -A app.worker worker --loglevel=info --concurrency=2
     environment:
-      - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=${DATABASE_URL:-}
-      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-}
-      - R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-}
-      - R2_SECRET_KEY=${R2_SECRET_KEY:-}
-      - R2_BUCKET_NAME=${R2_BUCKET_NAME:-}
-      - R2_PUBLIC_URL=${R2_PUBLIC_URL:-}
-    volumes:
-      - ./song_library:/app/song_library
-      - ./song_id.db:/app/song_id.db
+      REDIS_URL:    redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg2://songid:${DB_PASSWORD:-songid_dev_password}@postgres:5432/songid
+      R2_ACCOUNT_ID:    ${R2_ACCOUNT_ID}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID}
+      R2_SECRET_KEY:    ${R2_SECRET_KEY}
+      R2_BUCKET_NAME:   ${R2_BUCKET_NAME}
+      R2_PUBLIC_URL:    ${R2_PUBLIC_URL}
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - /tmp:/tmp   # shared temp folder for audio files
     restart: unless-stopped
 
 volumes:
   redis_data:
+  postgres_data:
