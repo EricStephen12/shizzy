@@ -298,32 +298,41 @@ async def admin_upload(
     audio:  UploadFile = File(..., description="Audio file to upload and ingest"),
     title:  str        = Form(..., description="Song title"),
     artist: str        = Form("", description="Artist name (optional)"),
+    source_url: str    = Form("", description="Original source URL (optional, used as stream_url)"),
     db:     Session    = Depends(get_db),
 ):
     """
     Admin endpoint — upload a song with a real title.
-    Saves to R2, stores metadata in DB, runs fingerprint + melody ingest.
+    Runs fingerprint + melody ingest immediately.
+    Stores source_url as the stream_url if provided.
     """
     from app import fingerprint_engine, melody_engine
-    from app.r2_storage import _get_client, R2_BUCKET_NAME, get_public_url
 
-    # Save upload to temp
     tmp_path = _save_upload(audio)
 
     try:
-        # Upload to R2
-        ext = os.path.splitext(audio.filename or ".mp3")[1] or ".mp3"
-        r2_key = f"uploads/{uuid.uuid4().hex}{ext}"
+        # Try to upload to R2 if credentials are available
+        r2_key = None
+        r2_url = source_url or None
 
-        client = _get_client()
-        client.upload_file(tmp_path, R2_BUCKET_NAME, r2_key)
-        r2_url = get_public_url(r2_key)
+        try:
+            from app.r2_storage import _get_client, R2_BUCKET_NAME, get_public_url
+            from app.config import R2_ACCESS_KEY_ID
+            if R2_ACCESS_KEY_ID:
+                ext = os.path.splitext(audio.filename or ".mp3")[1] or ".mp3"
+                r2_key = f"uploads/{uuid.uuid4().hex}{ext}"
+                client = _get_client()
+                client.upload_file(tmp_path, R2_BUCKET_NAME, r2_key)
+                r2_url = get_public_url(r2_key)
+        except Exception as r2_err:
+            print(f"[admin/upload] R2 upload skipped: {r2_err}")
+            # Continue without R2 — use source_url as stream_url
 
         # Save song metadata
         song = Song(
             title=title,
             artist=artist or None,
-            file_path=r2_key,
+            file_path=r2_key or audio.filename,
             r2_key=r2_key,
             r2_url=r2_url,
         )
@@ -341,7 +350,7 @@ async def admin_upload(
             "title":     song.title,
             "artist":    song.artist,
             "r2_key":    r2_key,
-            "r2_url":    r2_url,
+            "stream_url": r2_url,
             "hashes":    fp_count,
             "melody":    melody_ok,
         }
