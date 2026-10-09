@@ -37,8 +37,8 @@ from app.config import FREE_TIER_LIMIT
 # App setup
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Song ID API",
-    description="Private Shazam-style song identification — fingerprint + melody matching.",
+    title="Song Sort API",
+    description="Loveworld Song Sort — identify songs by audio fingerprint or melody.",
     version="2.0.0",
 )
 
