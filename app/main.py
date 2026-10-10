@@ -285,51 +285,44 @@ async def admin_ingest_url(
     db:         Session = Depends(get_db),
 ):
     """
-    Admin endpoint — ingest a song directly from a URL.
-    Railway downloads the audio, runs fingerprint + melody, stores metadata.
+    Admin endpoint — queue a song for ingestion from a URL.
+    Returns immediately — Celery worker handles download + fingerprint in background.
     """
-    import urllib.request
-    from app import fingerprint_engine, melody_engine
+    from app.worker import ingest_url_task
 
-    # Download directly on Railway server
-    tmp_path = os.path.join(tempfile.gettempdir(), f"songid_{uuid.uuid4().hex}.mp3")
-    try:
-        print(f"[ingest-url] Downloading: {title} from {source_url}")
-        urllib.request.urlretrieve(source_url, tmp_path)
-        size = os.path.getsize(tmp_path)
-        print(f"[ingest-url] Downloaded {size//1024}KB")
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download audio: {e}")
+    # Register song in DB immediately with the URL as stream_url
+    existing = db.query(Song).filter(Song.r2_url == source_url).first()
+    if existing:
+        return {"status": "already_exists", "song_id": existing.id, "title": existing.title}
 
-    try:
-        song = Song(
-            title=title,
-            artist=artist or None,
-            file_path=source_url,
-            r2_key=None,
-            r2_url=source_url,  # use Cloudinary URL as stream URL
-        )
-        db.add(song)
-        db.commit()
-        db.refresh(song)
+    song = Song(
+        title=title,
+        artist=artist or None,
+        file_path=source_url,
+        r2_key=None,
+        r2_url=source_url,
+    )
+    db.add(song)
+    db.commit()
+    db.refresh(song)
 
-        fp_count = fingerprint_engine.store_fingerprints(song.id, tmp_path, db)
-        melody_ok = melody_engine.store_contour(song.id, tmp_path, db)
-
-        return {
-            "status":     "ingested",
-            "song_id":    song.id,
-            "title":      song.title,
-            "artist":     song.artist,
-            "stream_url": source_url,
-            "hashes":     fp_count,
-            "melody":     melody_ok,
-        }
-    finally:
+    # Queue fingerprinting in background
+    if ping_redis():
+        ingest_url_task.delay(song.id, source_url)
+        return {"status": "queued", "song_id": song.id, "title": song.title, "message": "Fingerprinting in background"}
+    else:
+        # Sync fallback
+        import urllib.request
+        from app import fingerprint_engine, melody_engine
+        tmp_path = os.path.join(tempfile.gettempdir(), f"songid_{uuid.uuid4().hex}.mp3")
         try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+            urllib.request.urlretrieve(source_url, tmp_path)
+            fp_count = fingerprint_engine.store_fingerprints(song.id, tmp_path, db)
+            melody_engine.store_contour(song.id, tmp_path, db)
+            return {"status": "ingested", "song_id": song.id, "title": song.title, "hashes": fp_count}
+        finally:
+            try: os.remove(tmp_path)
+            except: pass
     """Return all songs in the library."""
     songs = db.query(Song).all()
     return [

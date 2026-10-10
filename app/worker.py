@@ -43,6 +43,36 @@ celery_app.conf.update(
 # Tasks
 # ---------------------------------------------------------------------------
 
+@celery_app.task(bind=True, name="songid.ingest_url")
+def ingest_url_task(self, song_id: int, source_url: str):
+    """Download audio from URL and run fingerprint + melody ingest."""
+    import urllib.request
+    from app.db import SessionLocal
+    from app import fingerprint_engine, melody_engine
+
+    db = SessionLocal()
+    tmp_path = None
+    try:
+        tmp_path = os.path.join(tempfile.gettempdir(), f"songid_ingest_{song_id}.mp3")
+        print(f"[ingest_url] Downloading song {song_id} from {source_url}")
+        urllib.request.urlretrieve(source_url, tmp_path)
+        size = os.path.getsize(tmp_path)
+        print(f"[ingest_url] Downloaded {size//1024}KB")
+
+        fp_count = fingerprint_engine.store_fingerprints(song_id, tmp_path, db)
+        melody_ok = melody_engine.store_contour(song_id, tmp_path, db)
+        print(f"[ingest_url] Song {song_id} done — {fp_count} hashes, melody={melody_ok}")
+        return {"song_id": song_id, "hashes": fp_count, "melody": melody_ok}
+    except Exception as exc:
+        print(f"[ingest_url] ERROR song {song_id}: {exc}")
+        raise
+    finally:
+        db.close()
+        if tmp_path:
+            try: os.remove(tmp_path)
+            except: pass
+
+
 @celery_app.task(bind=True, name="songid.identify")
 def identify_task(self, audio_path: str, mode: str = "auto", user_id: str = "anonymous"):
     """
