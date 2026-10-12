@@ -189,12 +189,27 @@ async def identify(
     # --- Async path (Redis available) ---
     if redis_ok:
         try:
+            import base64
             from app.worker import identify_task
-            task = identify_task.delay(tmp_path, mode, user_id)
+
+            # Read audio file and encode as base64 so worker can receive it
+            # cross-container (worker has different /tmp/ filesystem)
+            with open(tmp_path, "rb") as f:
+                audio_bytes = f.read()
+            ext = os.path.splitext(tmp_path)[1] or ".wav"
+            audio_b64 = f"b64:{ext}:" + base64.b64encode(audio_bytes).decode()
+
+            task = identify_task.delay(audio_b64, mode, user_id)
 
             # Increment usage counter
             increment_usage(user_id)
             remaining_after = get_remaining_free(user_id)
+
+            # Cleanup local temp file — worker has the data in base64
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
             return {
                 "job_id":    task.id,
