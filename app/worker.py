@@ -92,13 +92,13 @@ def identify_task(self, audio_path: str, mode: str = "auto", user_id: str = "ano
     tmp_created = False
     if audio_path.startswith("b64:"):
         import base64
-        audio_data = base64.b64decode(audio_path[4:])
-        ext = audio_path.split(":")[1] if ":" in audio_path[4:] else ".wav"
         # Format: b64:.wav:BASE64DATA
         parts = audio_path.split(":", 2)
-        if len(parts) == 3:
-            ext = parts[1]
-            audio_data = base64.b64decode(parts[2])
+        ext = parts[1] if len(parts) == 3 else ".wav"
+        b64_data = parts[2] if len(parts) == 3 else parts[1]
+        # Fix padding
+        b64_data += "=" * (-len(b64_data) % 4)
+        audio_data = base64.b64decode(b64_data)
         tmp_path = os.path.join(tempfile.gettempdir(), f"songid_worker_{job_id}{ext}")
         with open(tmp_path, "wb") as f:
             f.write(audio_data)

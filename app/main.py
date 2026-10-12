@@ -197,7 +197,7 @@ async def identify(
             with open(tmp_path, "rb") as f:
                 audio_bytes = f.read()
             ext = os.path.splitext(tmp_path)[1] or ".wav"
-            audio_b64 = f"b64:{ext}:" + base64.b64encode(audio_bytes).decode()
+            audio_b64 = "b64:" + ext + ":" + base64.b64encode(audio_bytes).decode("ascii")
 
             task = identify_task.delay(audio_b64, mode, user_id)
 
