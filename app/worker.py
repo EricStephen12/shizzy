@@ -16,6 +16,7 @@ import os
 import json
 import uuid
 import time
+import tempfile
 
 from celery import Celery
 from app.config import REDIS_URL, FREE_TIER_LIMIT
