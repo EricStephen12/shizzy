@@ -173,17 +173,10 @@ async def identify(
     # Force sync mode — async worker has cross-container file sharing issues
     # Will switch back to async when R2 temp file upload is implemented
     use_async = False
-    if redis_ok:
-        remaining = get_remaining_free(user_id)
-        if remaining <= 0:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "error":   "free_tier_exceeded",
-                    "message": f"You have used your {FREE_TIER_LIMIT} free identifications this month.",
-                    "upgrade": "Subscribe for $0.99/month for unlimited identifications.",
-                }
-            )
+    # Free tier disabled during testing
+    # if redis_ok:
+    #     remaining = get_remaining_free(user_id)
+    #     if remaining <= 0: raise HTTPException(402, ...)
 
     tmp_path = _save_upload(audio)
     file_size = os.path.getsize(tmp_path)
