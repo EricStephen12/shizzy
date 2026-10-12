@@ -170,6 +170,9 @@ async def identify(
 
     # --- Free tier check ---
     redis_ok = ping_redis()
+    # Force sync mode — async worker has cross-container file sharing issues
+    # Will switch back to async when R2 temp file upload is implemented
+    use_async = False
     if redis_ok:
         remaining = get_remaining_free(user_id)
         if remaining <= 0:
@@ -187,7 +190,7 @@ async def identify(
     print(f"[identify] user={user_id} file={audio.filename} size={file_size}b mode={mode}")
 
     # --- Async path (Redis available) ---
-    if redis_ok:
+    if redis_ok and use_async:
         try:
             import base64
             from app.worker import identify_task
