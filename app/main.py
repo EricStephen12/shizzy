@@ -334,6 +334,10 @@ async def admin_ingest_url(
         finally:
             try: os.remove(tmp_path)
             except: pass
+
+
+@app.get("/songs")
+def list_songs(db: Session = Depends(get_db)):
     """Return all songs in the library."""
     songs = db.query(Song).all()
     return [
