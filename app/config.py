@@ -53,7 +53,7 @@ FP_PEAKS_PER_SEC = 10
 FP_FREQ_MIN = 300
 FP_FREQ_MAX = 3000
 # Minimum Jaccard-style match ratio to consider a fingerprint hit valid
-FP_CONFIDENCE_THRESHOLD = 0.03   # 3% of hashes must align
+FP_CONFIDENCE_THRESHOLD = 0.08   # 8% of hashes must align
 
 # ---------------------------------------------------------------------------
 # Melody / pYIN settings

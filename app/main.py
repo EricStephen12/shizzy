@@ -31,7 +31,7 @@ from app.db import init_db, get_db, Song
 from app import fingerprint_engine, melody_engine
 from app.redis_client import ping_redis, cache_redis
 from app.usage import get_usage, increment_usage, get_remaining_free, is_within_free_tier
-from app.config import FREE_TIER_LIMIT
+from app.config import FREE_TIER_LIMIT, FP_CONFIDENCE_THRESHOLD
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -95,7 +95,7 @@ def _run_sync(tmp_path: str, mode: str, db: Session) -> dict:
         except Exception as exc:
             print(f"[sync] fingerprint error: {exc}")
 
-    fp_min_confidence = 0.03 if mode == "fingerprint" else 0.05
+    fp_min_confidence = FP_CONFIDENCE_THRESHOLD
     if fp_result and fp_result["confidence"] >= fp_min_confidence:
         song = db.query(Song).filter_by(id=fp_result["song_id"]).first()
         return {
