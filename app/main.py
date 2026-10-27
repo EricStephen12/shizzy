@@ -49,6 +49,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from app.dashboard import router as dashboard_router
+app.include_router(dashboard_router)
+
 
 @app.on_event("startup")
 def on_startup():

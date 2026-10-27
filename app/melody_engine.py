@@ -1,84 +1,100 @@
 """
-melody_engine.py — Hum/melody matching via pYIN pitch extraction + fastdtw.
+melody_engine.py — High-Accuracy Hum & Singing Recognition Engine.
 
 Algorithm:
-  1. Load audio (hum or reference song)
-  2. Run librosa.pyin() to get a frame-by-frame fundamental frequency (F0)
-  3. Discard unvoiced frames (NaN)
-  4. Convert F0 sequence to a *relative direction contour*:
-       +1 = pitch rose, -1 = pitch fell, 0 = stayed roughly the same
-  5. Store the contour in Postgres (once, at ingest time)
+  1. Load audio clip (hum or reference song) → mono at 22,050 Hz.
+  2. Extract fundamental frequency (F0) with librosa.pyin().
+  3. Filter unvoiced / silence frames.
+  4. Convert F0 in Hz to continuous MIDI semitones:  69 + 12 * log2(F0 / 440).
+  5. Apply median filtering to smooth vocal vibrato / pitch tremor.
+  6. Center the contour around its median pitch (Key Invariant: whether sung
+     in a high or low pitch, the relative melody intervals are identical).
+  7. Store the normalized semitone contour in Postgres.
 
 Matching:
-  1. Extract contour from the incoming hum clip
-  2. Run fastdtw against every stored contour
-  3. Return top-3 matches sorted by DTW distance (lower = better)
-  4. Normalise distance → 0–1 confidence (inverse, clipped)
+  1. Extract semitone contour from the hummed audio clip.
+  2. Slide across reference contours using FastDTW (Dynamic Time Warping).
+  3. Returns matches ranked by lowest semitone deviation.
 """
 
-from typing import Optional
-
+from typing import Optional, List
 import numpy as np
 import librosa
 from fastdtw import fastdtw
 from scipy.spatial.distance import euclidean
+from scipy.signal import medfilt
 from sqlalchemy.orm import Session
 
-from app.config import PYIN_FMIN, PYIN_FMAX, MELODY_DTW_MAX_DISTANCE
+from app.config import PYIN_FMIN, PYIN_FMAX
 from app.db import Song, MelodyContour
 
-# ---------------------------------------------------------------------------
-# Contour extraction
-# ---------------------------------------------------------------------------
+# Sampling resolution: ~10.7 frames per second (smooth, fast, accurate)
+HOP_LENGTH = 2048
+SR = 22050
 
-def extract_contour(audio_path: str) -> list[int]:
+# Maximum average semitone error for a plausible melody hit
+MAX_ACCEPTABLE_SEMITONE_ERROR = 2.2
+
+
+def extract_contour(audio_path: str) -> List[float]:
     """
-    Load audio and return a pitch-direction contour: list of -1, 0, or 1.
-
-    Unvoiced frames (where pYIN returns NaN) are dropped so the contour
-    only captures the melody, not silence.
+    Extract a key-invariant, semitone pitch contour from an audio clip.
+    Returns a list of relative semitones (e.g. [-2.1, 0.0, +2.0, +3.5...])
+    or [] if the audio has insufficient vocal/melodic content.
     """
-    y, sr = librosa.load(audio_path, sr=None, mono=True)
-
-    f0, voiced_flag, _ = librosa.pyin(
-        y,
-        fmin=librosa.note_to_hz(PYIN_FMIN),
-        fmax=librosa.note_to_hz(PYIN_FMAX),
-        sr=sr,
-    )
-
-    # Keep only voiced frames with a valid F0
-    voiced_f0 = [float(v) for v, flag in zip(f0, voiced_flag)
-                 if flag and not np.isnan(v)]
-
-    if len(voiced_f0) < 2:
+    try:
+        y, sr = librosa.load(audio_path, sr=SR, mono=True)
+    except Exception as exc:
+        print(f"[melody] Failed to load audio {audio_path}: {exc}")
         return []
 
-    contour = []
-    for i in range(1, len(voiced_f0)):
-        diff = voiced_f0[i] - voiced_f0[i - 1]
-        if diff > 2.0:       # threshold: >2 Hz = clearly went up
-            contour.append(1)
-        elif diff < -2.0:    # threshold: >2 Hz = clearly went down
-            contour.append(-1)
-        else:
-            contour.append(0)
+    if len(y) < SR * 0.8:  # Less than 0.8s
+        return []
 
-    return contour
+    try:
+        f0, voiced_flag, _ = librosa.pyin(
+            y,
+            fmin=librosa.note_to_hz(PYIN_FMIN),
+            fmax=librosa.note_to_hz(PYIN_FMAX),
+            sr=sr,
+            hop_length=HOP_LENGTH,
+        )
+    except Exception as exc:
+        print(f"[melody] pYIN error: {exc}")
+        return []
 
+    # Extract voiced frequencies
+    voiced_f0 = [
+        float(v) for v, flag in zip(f0, voiced_flag)
+        if flag and not np.isnan(v) and v > 50.0
+    ]
 
-# ---------------------------------------------------------------------------
-# Storage
-# ---------------------------------------------------------------------------
+    # Need at least ~1.5s of voiced melody to match accurately
+    if len(voiced_f0) < 12:
+        return []
+
+    # Convert Hz to MIDI semitones: 69 + 12 * log2(f / 440)
+    midi = 69.0 + 12.0 * np.log2(np.array(voiced_f0) / 440.0)
+
+    # Smooth out human vocal vibrato (pitch wobble) with a 5-frame median filter
+    if len(midi) >= 5:
+        midi = medfilt(midi, kernel_size=5)
+
+    # Key Invariance: subtract median pitch so key of C and key of G match identically
+    median_pitch = float(np.median(midi))
+    normalized_contour = midi - median_pitch
+
+    # Round to 2 decimal places to save DB storage while preserving micro-tonal nuance
+    return [round(float(p), 2) for p in normalized_contour]
+
 
 def store_contour(song_id: int, audio_path: str, db: Session) -> bool:
     """
-    Extract and store a melody contour for a song.
-    Returns True if stored, False if the contour was too short (< 10 frames).
-    Idempotent — overwrites any existing contour for the same song.
+    Extract and save melody contour for a song.
+    Overwrites any existing contour for the song.
     """
     contour = extract_contour(audio_path)
-    if len(contour) < 10:
+    if len(contour) < 15:
         return False
 
     existing = db.query(MelodyContour).filter(MelodyContour.song_id == song_id).first()
@@ -91,73 +107,57 @@ def store_contour(song_id: int, audio_path: str, db: Session) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Matching
-# ---------------------------------------------------------------------------
-
-def _dtw_distance(a: list[int], b: list[int]) -> float:
-    """Wrapper around fastdtw using Euclidean distance on 1-D int arrays."""
-    arr_a = np.array(a, dtype=np.float32).reshape(-1, 1)
-    arr_b = np.array(b, dtype=np.float32).reshape(-1, 1)
-    distance, _ = fastdtw(arr_a, arr_b, dist=euclidean)
-    return float(distance)
+def _dtw_distance(a: np.ndarray, b: np.ndarray) -> float:
+    """FastDTW distance between two 1D pitch arrays."""
+    dist, _ = fastdtw(a.reshape(-1, 1), b.reshape(-1, 1), dist=euclidean)
+    return float(dist)
 
 
-def _normalise_confidence(distance: float, contour_len: int) -> float:
+def _best_window_distance(hum: np.ndarray, lib: np.ndarray) -> float:
     """
-    Convert a raw DTW distance to a 0–1 confidence score.
-    We normalise by contour length so short vs long hums are comparable.
-    """
-    if contour_len == 0:
-        return 0.0
-    per_frame = distance / max(contour_len, 1)
-    # Map 0 → 1.0 confidence, MELODY_DTW_MAX_DISTANCE/len → 0.0 confidence
-    max_per_frame = MELODY_DTW_MAX_DISTANCE / max(contour_len, 1)
-    score = 1.0 - min(per_frame / max_per_frame, 1.0)
-    return round(score, 4)
-
-
-def _best_window_distance(hum: list[int], lib: list[int]) -> float:
-    """
-    Find the best matching window in the library contour for the hum.
-    Slides a window of hum_len across the library contour and returns
-    the minimum DTW distance found. This handles the case where the user
-    hums a short section of a long song.
+    Slide a window equal to the hum length across the song contour.
+    Returns the minimum average semitone error per frame.
     """
     hum_len = len(hum)
     lib_len = len(lib)
 
-    # If library is shorter than hum, just compare directly
     if lib_len <= hum_len:
-        return _dtw_distance(hum, lib)
+        raw_dist = _dtw_distance(hum, lib)
+        return raw_dist / max(hum_len, 1)
 
-    # Slide window across library contour with 50% step for speed
-    step = max(1, hum_len // 2)
-    best_dist = float('inf')
+    # Step through reference song in 3-frame increments (~0.3s steps)
+    step = 3
+    best_avg_error = float("inf")
 
     for start in range(0, lib_len - hum_len + 1, step):
         window = lib[start:start + hum_len]
-        dist = _dtw_distance(hum, window)
-        if dist < best_dist:
-            best_dist = dist
+        # Re-center window to handle local key variations within the song
+        window_norm = window - np.median(window)
+        raw_dist = _dtw_distance(hum, window_norm)
+        avg_error = raw_dist / hum_len
 
-    return best_dist
+        if avg_error < best_avg_error:
+            best_avg_error = avg_error
+            # Early break if an almost perfect match is found (< 0.3 semitones error)
+            if best_avg_error < 0.3:
+                break
+
+    return best_avg_error
 
 
-def match_melody(audio_path: str, db: Session, top_n: int = 3) -> list[dict]:
+def match_melody(audio_path: str, db: Session, top_n: int = 3) -> List[dict]:
     """
-    Match a hum/melody clip against all stored contours.
-    Uses sliding window DTW so a short hum can match against a full song.
-
-    Returns a list (up to top_n) of:
-        { "song_id": int, "title": str, "artist": str, "confidence": float }
-    sorted best-first.  Returns [] if the hum is too short or no matches exist.
+    Match a hummed/sung clip against all stored song contours.
+    Returns ranked list of candidate songs with confidence scores.
     """
-    hum_contour = extract_contour(audio_path)
-    print(f"[melody] hum contour length: {len(hum_contour)}")
-    if len(hum_contour) < 5:
-        print("[melody] hum too short, skipping")
+    hum_list = extract_contour(audio_path)
+    if len(hum_list) < 12:
+        print("[melody] Hum too short or quiet to extract melody")
         return []
+
+    hum_arr = np.array(hum_list, dtype=np.float32)
+    # Ensure zero-median
+    hum_arr = hum_arr - np.median(hum_arr)
 
     all_contours = (
         db.query(MelodyContour)
@@ -167,23 +167,39 @@ def match_melody(audio_path: str, db: Session, top_n: int = 3) -> list[dict]:
     if not all_contours:
         return []
 
-    scores = []
+    candidates = []
     for row in all_contours:
-        lib_contour = row.contour
-        if not lib_contour:
+        lib_data = row.contour
+        if not lib_data or len(lib_data) < 15:
             continue
-        dist = _best_window_distance(hum_contour, lib_contour)
-        confidence = _normalise_confidence(dist, len(hum_contour))
-        scores.append({
-            "song_id":    row.song_id,
-            "title":      row.song.title if row.song else "Unknown",
-            "artist":     row.song.artist if row.song else None,
-            "confidence": confidence,
-            "_distance":  dist,
+
+        lib_arr = np.array(lib_data, dtype=np.float32)
+        avg_semitone_error = _best_window_distance(hum_arr, lib_arr)
+
+        if avg_semitone_error <= MAX_ACCEPTABLE_SEMITONE_ERROR:
+            # Map error: 0.0 error -> 1.0 (100%), 2.2 error -> 0.0 (0%)
+            confidence = max(0.0, 1.0 - (avg_semitone_error / MAX_ACCEPTABLE_SEMITONE_ERROR))
+            confidence = round(float(confidence), 3)
+
+            candidates.append({
+                "song_id": row.song_id,
+                "title": row.song.title if row.song else "Unknown",
+                "artist": row.song.artist if row.song else "Loveworld Singers",
+                "confidence": confidence,
+                "avg_error": round(avg_semitone_error, 2),
+            })
+
+    # Sort by highest confidence (lowest error)
+    candidates.sort(key=lambda x: x["confidence"], reverse=True)
+
+    # Clean up internal fields
+    results = []
+    for c in candidates[:top_n]:
+        results.append({
+            "song_id": c["song_id"],
+            "title": c["title"],
+            "artist": c["artist"],
+            "confidence": c["confidence"],
         })
 
-    scores.sort(key=lambda x: x["_distance"])
-    for s in scores:
-        s.pop("_distance")
-
-    return scores[:top_n]
+    return results

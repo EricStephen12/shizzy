@@ -47,13 +47,13 @@ REDIS_URL = _get_env("REDIS_URL", "redis://localhost:6379/0")
 
 # Free tier limit before paywall
 FREE_TIER_LIMIT = 3
-# Number of spectrogram peaks kept per second (higher = more precise, slower ingest)
-FP_PEAKS_PER_SEC = 10
-# Frequency band for fingerprinting (Hz)
-FP_FREQ_MIN = 300
-FP_FREQ_MAX = 3000
-# Minimum Jaccard-style match ratio to consider a fingerprint hit valid
-FP_CONFIDENCE_THRESHOLD = 0.08   # 8% of hashes must align
+# Number of spectrogram peaks kept per second (higher = more precise, noise-resistant)
+FP_PEAKS_PER_SEC = 16
+# Frequency band for fingerprinting (Hz) — captures full human vocal and melodic range
+FP_FREQ_MIN = 250
+FP_FREQ_MAX = 4200
+# Minimum coherent time-aligned hash ratio to consider a fingerprint hit valid
+FP_CONFIDENCE_THRESHOLD = 0.06
 
 # ---------------------------------------------------------------------------
 # Melody / pYIN settings
