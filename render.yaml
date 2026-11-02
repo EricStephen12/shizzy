@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: songsort-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false          # Set this manually in Render dashboard
+      - key: REDIS_URL
+        sync: false          # Set this manually in Render dashboard (optional)
+      - key: R2_ACCOUNT_ID
+        value: b2e5411830e116cf4ce6e91e90843db0
+      - key: R2_BUCKET_NAME
+        value: rehearsalhub-media
+      - key: R2_PUBLIC_URL
+        value: https://pub-cb7697578fcc48d3b3aeb70a47eb2f65.r2.dev
+      - key: R2_ACCESS_KEY_ID
+        sync: false          # Set in Render dashboard (sensitive)
+      - key: R2_SECRET_KEY
+        sync: false          # Set in Render dashboard (sensitive)
+    autoDeploy: true
